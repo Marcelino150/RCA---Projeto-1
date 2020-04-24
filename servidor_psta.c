@@ -11,8 +11,10 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 #define TAM_BLC 65536
+#define PASTA "Arquivos/"
 
 struct parametro{
 	int ns;
@@ -26,21 +28,21 @@ struct requisicao{
 };
 
 void *atenderCliente(void *parametros);
-void encerrarConexao();
-void listarArquivos();
-void enviarArquivo();
-void receberArquivo(struct parametro clienteInfo, char *nomeRemoto);
+int encerrarConexao();
+int listarArquivos(struct parametro clienteInfo);
+int enviarArquivo();
+int receberArquivo(struct parametro clienteInfo, char *nomeRemoto);
 
 void main(){
     
-    unsigned short port;                   
+    //unsigned short port;                   
     struct sockaddr_in client; 
     struct sockaddr_in server; 
     int s, ns, namelen, tp;
     pthread_t thread;
     struct parametro parametros;
 
-    port = (unsigned short)7777;
+    //port = (unsigned short)7777;
 
     if ((s = socket(PF_INET, SOCK_STREAM, 0)) < 0){
 	  perror("Socket()");
@@ -48,12 +50,18 @@ void main(){
     }
 
     server.sin_family = AF_INET;   
-    server.sin_port   = htons(port);       
+    server.sin_port   = 0;//htons(port);       
     server.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(s, (struct sockaddr *)&server, sizeof(server)) < 0){
         perror("Bind()");
         exit(3);
+    }
+
+    namelen = sizeof(server);
+    if (getsockname(s, (struct sockaddr *) &server, &namelen) < 0){
+        perror("getsockname()");
+        exit(1);
     }
 
     if (listen(s, 1) != 0){
@@ -65,7 +73,6 @@ void main(){
 
     while(1){
 
-        namelen = sizeof(client);
         if ((ns = accept(s, (struct sockaddr *) &client, (socklen_t *) &namelen)) == -1){
             perror("Accept()");
             exit(5);
@@ -108,10 +115,10 @@ void *atenderCliente(void *parametros){
             break;            
         }
         else if (strcmp(req.op, "listar") == 0){
-            listarArquivos();
+            listarArquivos(*((struct parametro*)parametros));
         }
         else if (strcmp(req.op, "receber") == 0){
-            enviarArquivo();
+            enviarArquivo(*((struct parametro*)parametros), req.nomeRemoto);
         }
     }
 
@@ -119,25 +126,82 @@ void *atenderCliente(void *parametros){
     pthread_exit(NULL);
 }
 
-void listarArquivos(){
+int listarArquivos(struct parametro clienteInfo){
 
+    char chamada[128] = "ls ";
+    char listaArquivos[512];
+    FILE *shell = NULL;
+
+    mkdir(PASTA, S_IRWXU | S_IRWXG | S_IRWXO);
+    strcat(chamada, PASTA);
+
+    shell = popen(chamada,"r");
+	fread(listaArquivos,sizeof(char),512,shell);
+    pclose(shell);
+
+    if (send(clienteInfo.ns, listaArquivos, sizeof(listaArquivos), 0) <= 0){
+        perror("Send()");
+        return 0;
+    }
 }
 
-void enviarArquivo(){
+int enviarArquivo(struct parametro clienteInfo, char *nomeRemoto){
+    
+    FILE *arquivoRemoto;
+    void *bloco;
+    int tamanho, bLidos;
+    char *caminhoArquivo;
 
+    mkdir(PASTA, S_IRWXU | S_IRWXG | S_IRWXO);
+
+    caminhoArquivo = (char*)malloc(sizeof(char)*128);
+    strcat(caminhoArquivo, PASTA);
+    strcat(caminhoArquivo, nomeRemoto);
+    arquivoRemoto = fopen(caminhoArquivo,"rb");
+
+    fseek (arquivoRemoto , 0 , SEEK_END);
+    tamanho = ftell(arquivoRemoto);
+    rewind (arquivoRemoto);
+
+    bloco = malloc(TAM_BLC);
+    
+    if (send(clienteInfo.ns, &tamanho, sizeof(tamanho), 0) <= 0){
+        perror("Send()");
+        exit(1);
+    }
+    
+    while(tamanho > 0 && (bLidos = fread(bloco, 1, TAM_BLC, arquivoRemoto)) >= 0){
+
+        if (send(clienteInfo.ns, bloco, bLidos, 0) <= 0){
+            perror("Send()");
+            exit(1);
+        }
+
+        tamanho -= bLidos;  
+    }
+    
+    fclose(arquivoRemoto);
+    free(bloco);
+    free(caminhoArquivo);
 }
 
-void receberArquivo(struct parametro clienteInfo, char *nomeRemoto){
+int receberArquivo(struct parametro clienteInfo, char *nomeRemoto){
 
     void *bloco;
     FILE *arquivoRemoto;
     int bRecebidos = 0, tamanho;
+    char *caminhoArquivo;
+
+    mkdir(PASTA, S_IRWXU | S_IRWXG | S_IRWXO);
+
+    caminhoArquivo = (char*)malloc(sizeof(char)*128);
+    strcat(caminhoArquivo, PASTA);
+    strcat(caminhoArquivo, nomeRemoto);
+    arquivoRemoto = fopen(caminhoArquivo,"wb");
 
     bloco = malloc(TAM_BLC);
 
-    arquivoRemoto = fopen(nomeRemoto,"wb");
-
-    if (recv(clienteInfo.ns, &tamanho, sizeof(int), 0) <= 0){
+    if (recv(clienteInfo.ns, &tamanho, sizeof(tamanho), 0) <= 0){
         perror("Recv()");
         exit(6);
     }
@@ -154,6 +218,7 @@ void receberArquivo(struct parametro clienteInfo, char *nomeRemoto){
 
     fclose(arquivoRemoto);
     free(bloco);
+    free(caminhoArquivo);
 
     printf("Recebido o arquivo do endereco IP %s da porta %d\n", inet_ntoa(clienteInfo.cliente.sin_addr), ntohs(clienteInfo.cliente.sin_port));
 }
