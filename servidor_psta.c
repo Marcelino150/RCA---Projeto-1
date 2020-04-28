@@ -12,12 +12,14 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <signal.h>
 
 #define TAM_BLC 65536
 #define PASTA "Arquivos/"
 
 struct parametro{
-	int ns;
+	int socketControle;
 	struct sockaddr_in cliente;
 };
 
@@ -28,105 +30,138 @@ struct requisicao{
 };
 
 void *atenderCliente(void *parametros);
-int encerrarConexao();
-int listarArquivos(struct parametro clienteInfo);
-int enviarArquivo();
-int receberArquivo(struct parametro clienteInfo, char *nomeRemoto);
+int listarArquivos(struct parametro clienteInfo, int socketDados);
+int enviarArquivo(struct parametro clienteInfo, char *nomeRemoto, int socketDados);
+int receberArquivo(struct parametro clienteInfo, char *nomeRemoto, int socketDados);
+int encerrarConexao(int s);
+int conectarCliente(struct sockaddr_in cliente, int portaCliente);
+int verificaExistencia(int socketDados, char *nomeArquivo);
+
+int socketControle = 0;
+int socketAux;
 
 void main(){
-    
-    //unsigned short port;                   
+                    
     struct sockaddr_in client; 
     struct sockaddr_in server; 
-    int s, ns, namelen, tp;
+    int namelen, tp;
     pthread_t thread;
     struct parametro parametros;
 
-    //port = (unsigned short)7777;
-
-    if ((s = socket(PF_INET, SOCK_STREAM, 0)) < 0){
-	  perror("Socket()");
-	  exit(2);
+    if ((socketControle = socket(PF_INET, SOCK_STREAM, 0)) < 0){
+        exit(0);
     }
 
     server.sin_family = AF_INET;   
-    server.sin_port   = 0;//htons(port);       
+    server.sin_port   = 0;      
     server.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(s, (struct sockaddr *)&server, sizeof(server)) < 0){
-        perror("Bind()");
-        exit(3);
+    if (bind(socketControle, (struct sockaddr *)&server, sizeof(server)) < 0){
+        exit(0);
     }
 
     namelen = sizeof(server);
-    if (getsockname(s, (struct sockaddr *) &server, &namelen) < 0){
-        perror("getsockname()");
-        exit(1);
+    if (getsockname(socketControle, (struct sockaddr *) &server, &namelen) < 0){
+        exit(0);
     }
 
-    if (listen(s, 1) != 0){
-        perror("Listen()");
-        exit(4);
+    if (listen(socketControle, 1) != 0){
+        exit(0);
     }
 
     printf("Servidor aberto na porta %d.\n", ntohs(server.sin_port));
 
     while(1){
 
-        if ((ns = accept(s, (struct sockaddr *) &client, (socklen_t *) &namelen)) == -1){
-            perror("Accept()");
-            exit(5);
+        if ((socketAux = accept(socketControle, (struct sockaddr *) &client, (socklen_t *) &namelen)) == -1){
+            printf("ERRO: impossivel aceitar conexão.\n");
+            exit(0);
         }
  
-        parametros.ns = ns;
+        parametros.socketControle = socketAux;
         parametros.cliente = client;
 
         tp = pthread_create(&thread, NULL, &atenderCliente, (void*)&parametros);
 
         if (tp) {
-            printf("ERRO: impossivel criar um thread\n");
-            exit(-1);
+            printf("ERRO: impossivel criar thread.\n");
+            exit(0);
         }
 
-        printf("Thread atendente criada\n");	
-
+        printf("Thread atendente criada.\n");	
         pthread_detach(thread);
     };
     
-    close(s);
+    close(socketControle);
 }
 
 void *atenderCliente(void *parametros){
 
     struct requisicao req;
-    int ns = ((struct parametro*)parametros)-> ns;
+    int socketControle = ((struct parametro*)parametros)-> socketControle;
+    int socketDados = 0;
 
     while(1){
 
-        if (recv(ns, &req, sizeof(req), 0) <= 0){
-            perror("Recv()");
-            exit(6);
+        if (recv(socketControle, &req, sizeof(req), 0) <= 0){
+            return 0;
         }
 
         if (strcmp(req.op, "enviar") == 0){
-            receberArquivo(*((struct parametro*)parametros), req.nomeRemoto);
-        }
-        else if (strcmp(req.op, "encerrar") == 0){
-            break;            
+            socketDados = conectarCliente(((struct parametro*)parametros)-> cliente, req.porta);
+            if(receberArquivo(*((struct parametro*)parametros), req.nomeRemoto, socketDados)){
+                printf("Recebido arquivo do endereco IP %s porta %d\n", inet_ntoa(((struct parametro*)parametros)-> cliente.sin_addr), req.porta);
+            };
+            encerrarConexao(socketDados);
         }
         else if (strcmp(req.op, "listar") == 0){
-            listarArquivos(*((struct parametro*)parametros));
+            socketDados = conectarCliente(((struct parametro*)parametros)-> cliente, req.porta);
+            if(listarArquivos(*((struct parametro*)parametros), socketDados)){
+                printf("Enviada lista de arquivos para o IP %s porta %d\n", inet_ntoa(((struct parametro*)parametros)-> cliente.sin_addr), req.porta);
+            }
+            encerrarConexao(socketDados);
         }
         else if (strcmp(req.op, "receber") == 0){
-            enviarArquivo(*((struct parametro*)parametros), req.nomeRemoto);
+            socketDados = conectarCliente(((struct parametro*)parametros)-> cliente, req.porta);
+            if(verificaExistencia(socketDados, req.nomeRemoto) && enviarArquivo(*((struct parametro*)parametros), req.nomeRemoto, socketDados)){
+                printf("Enviado arquivo para o IP %s porta %d\n", inet_ntoa(((struct parametro*)parametros)-> cliente.sin_addr), req.porta);
+            }
+            encerrarConexao(socketDados);
+        }
+        else if (strcmp(req.op, "encerrar") == 0){
+            printf("O IP %s desconectou.\n", inet_ntoa(((struct parametro*)parametros)-> cliente.sin_addr));
+            break;            
         }
     }
 
-    printf("Thread encerrada.\n");
+    printf("Thread atendente encerrada.\n");
     pthread_exit(NULL);
 }
 
-int listarArquivos(struct parametro clienteInfo){
+int verificaExistencia(int socketDados, char *nomeArquivo){
+
+    int rt;
+    char *caminhoArquivo;
+
+    caminhoArquivo = (char*)malloc(sizeof(char)*128);
+    bzero(caminhoArquivo, sizeof(caminhoArquivo));
+    strcat(caminhoArquivo, PASTA);
+    strcat(caminhoArquivo, nomeArquivo);
+
+    if(fopen(caminhoArquivo, "rb") <= 0){
+        rt = 0;
+    }
+    else{
+        rt = 1;
+    }
+
+    send(socketDados, &rt, sizeof(rt), 0);
+    free(caminhoArquivo);
+
+    return rt;
+}
+
+int listarArquivos(struct parametro clienteInfo, int socketDados){
 
     char chamada[128] = "ls ";
     char listaArquivos[512];
@@ -136,16 +171,17 @@ int listarArquivos(struct parametro clienteInfo){
     strcat(chamada, PASTA);
 
     shell = popen(chamada,"r");
+    bzero(listaArquivos, sizeof(listaArquivos));
 	fread(listaArquivos,sizeof(char),512,shell);
     pclose(shell);
 
-    if (send(clienteInfo.ns, listaArquivos, sizeof(listaArquivos), 0) <= 0){
-        perror("Send()");
+
+    if (send(socketDados, listaArquivos, sizeof(listaArquivos), 0) <= 0){
         return 0;
     }
 }
 
-int enviarArquivo(struct parametro clienteInfo, char *nomeRemoto){
+int enviarArquivo(struct parametro clienteInfo, char *nomeRemoto, int socketDados){
     
     FILE *arquivoRemoto;
     void *bloco;
@@ -155,9 +191,13 @@ int enviarArquivo(struct parametro clienteInfo, char *nomeRemoto){
     mkdir(PASTA, S_IRWXU | S_IRWXG | S_IRWXO);
 
     caminhoArquivo = (char*)malloc(sizeof(char)*128);
+    bzero(caminhoArquivo, sizeof(caminhoArquivo));
     strcat(caminhoArquivo, PASTA);
     strcat(caminhoArquivo, nomeRemoto);
-    arquivoRemoto = fopen(caminhoArquivo,"rb");
+    if((arquivoRemoto = fopen(caminhoArquivo,"rb")) <= 0){
+        free(caminhoArquivo);
+        return 0;
+    }
 
     fseek (arquivoRemoto , 0 , SEEK_END);
     tamanho = ftell(arquivoRemoto);
@@ -165,16 +205,14 @@ int enviarArquivo(struct parametro clienteInfo, char *nomeRemoto){
 
     bloco = malloc(TAM_BLC);
     
-    if (send(clienteInfo.ns, &tamanho, sizeof(tamanho), 0) <= 0){
-        perror("Send()");
-        exit(1);
+    if (send(socketDados, &tamanho, sizeof(tamanho), 0) <= 0){
+        return 0;
     }
     
     while(tamanho > 0 && (bLidos = fread(bloco, 1, TAM_BLC, arquivoRemoto)) >= 0){
 
-        if (send(clienteInfo.ns, bloco, bLidos, 0) <= 0){
-            perror("Send()");
-            exit(1);
+        if (send(socketDados, bloco, bLidos, 0) <= 0){
+            return 0;
         }
 
         tamanho -= bLidos;  
@@ -183,9 +221,11 @@ int enviarArquivo(struct parametro clienteInfo, char *nomeRemoto){
     fclose(arquivoRemoto);
     free(bloco);
     free(caminhoArquivo);
+
+    return 1;
 }
 
-int receberArquivo(struct parametro clienteInfo, char *nomeRemoto){
+int receberArquivo(struct parametro clienteInfo, char *nomeRemoto, int socketDados){
 
     void *bloco;
     FILE *arquivoRemoto;
@@ -195,21 +235,20 @@ int receberArquivo(struct parametro clienteInfo, char *nomeRemoto){
     mkdir(PASTA, S_IRWXU | S_IRWXG | S_IRWXO);
 
     caminhoArquivo = (char*)malloc(sizeof(char)*128);
+    bzero(caminhoArquivo, sizeof(caminhoArquivo));
     strcat(caminhoArquivo, PASTA);
     strcat(caminhoArquivo, nomeRemoto);
     arquivoRemoto = fopen(caminhoArquivo,"wb");
 
     bloco = malloc(TAM_BLC);
 
-    if (recv(clienteInfo.ns, &tamanho, sizeof(tamanho), 0) <= 0){
-        perror("Recv()");
-        exit(6);
+    if (recv(socketDados, &tamanho, sizeof(tamanho), 0) <= 0){
+        return 0;
     }
 
     do{
-        if ((bRecebidos = recv(clienteInfo.ns, bloco, TAM_BLC, 0)) <= 0){
-            perror("Recv()");
-            exit(6);
+        if ((bRecebidos = recv(socketDados, bloco, TAM_BLC, 0)) <= 0){
+            return 0;
         }
 
         tamanho -= bRecebidos;
@@ -220,5 +259,41 @@ int receberArquivo(struct parametro clienteInfo, char *nomeRemoto){
     free(bloco);
     free(caminhoArquivo);
 
-    printf("Recebido o arquivo do endereco IP %s da porta %d\n", inet_ntoa(clienteInfo.cliente.sin_addr), ntohs(clienteInfo.cliente.sin_port));
+    return 1;
+}
+
+int conectarCliente(struct sockaddr_in cliente, int portaCliente){
+
+    int s = 0, count = 0, rt = 0;
+    unsigned short port;
+    struct hostent *hostnm;
+    struct sockaddr_in server;
+
+    hostnm = gethostbyname(inet_ntoa(cliente.sin_addr));
+
+    if (hostnm == (struct hostent *)0){
+        return 0;
+    }
+
+    server.sin_family = AF_INET;
+    server.sin_port = htons((unsigned short)portaCliente);
+    server.sin_addr.s_addr = *((unsigned long *)hostnm->h_addr);
+
+    if ((s = socket(PF_INET, SOCK_STREAM, 0)) < 0){
+        return 0;
+    }
+
+    while((rt = connect(s, (struct sockaddr *)&server, sizeof(server))) < 0 && count < 250){
+        count++;
+    }
+
+    if(rt < 0){
+        return 0;
+    }
+
+    return s;
+}
+
+int encerrarConexao(int s){
+    close(s);
 }
