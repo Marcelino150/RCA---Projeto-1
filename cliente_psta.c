@@ -10,6 +10,8 @@
 #include <stdio_ext.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <signal.h>
 
 #define TAM_BLC 65536
 
@@ -19,24 +21,31 @@ struct requisicao{
 	char nomeRemoto[128];
 };
 
-int s = 0;
+int socketControle = 0;
+int socketDados = 0;
+int socketD = 0;
 
 int conectarServidor(char *nomeServidor, char *portaServidor);
 int listarArquivos();
 int receberArquivo(char *nomeLocal);
 int enviarArquivo(char *nomeLocal);
-int criarConexao();
-int encerrarConexao();
+int criarConexao(struct sockaddr_in *cliente, struct sockaddr_in *servidor);
+int encerrarConexao(int s);
 int requisitarOp(struct requisicao req);
+int aceitarConexao(struct sockaddr_in cliente, struct sockaddr_in servidor);
+void encerraCliente();
+int verificaExistencia();
 
 void main()
 {
     char comando[255];
-    char *op, *parametro1, *parametro2;
-    int rt;
+    char *op, *parametro1 = NULL, *parametro2 = NULL;
     struct requisicao req;
+    struct sockaddr_in cliente; 
+    struct sockaddr_in servidor;
+    int rt = 0, liberar = 0;
 
-    //conectarServidor("localhost","7777");
+    signal(SIGINT,encerraCliente);
 
     while (1){
 
@@ -48,54 +57,125 @@ void main()
         parametro1 = strtok(NULL, " ");
         parametro2 = strtok(NULL, " ");
 
-        if (strcmp(op, "conectar") == 0){
-            rt = conectarServidor(parametro1, parametro2);
+        if(parametro2 == NULL){
+            parametro2 = malloc(sizeof(parametro1));
+            strcpy(parametro2, parametro1);
+            liberar = 1;
+        }
 
-            if(rt == 0){
+        if (op && parametro1 && parametro2 && strcmp(op, "conectar") == 0){
+
+            if(socketControle != 0){
+                printf("ERRO: Voce já está conectado a um servidor. Pressione Enter para continuar....\n");
+                getchar();
+            }
+            else if(conectarServidor(parametro1, parametro2)){
                 printf("Conectado com sucesso! Pressione Enter para continuar...\n");
                 getchar();
             }
-            else if(rt < 0){
-                printf("Erro! Voce ja esta conectado a um servidor. Pressione Enter para continuar....\n");
+            else{
+                socketControle = 0;
+                printf("ERRO: Não foi possível se conectar ao servidor. Pressione Enter para continuar....\n");
                 getchar();
             } 
         }
-        else if (strcmp(op, "enviar") == 0){
-
+        else if (op && parametro1 && strcmp(op, "enviar") == 0){
             strcpy(req.op, op);
             strcpy(req.nomeRemoto, parametro2);
+            req.porta = criarConexao(&cliente, &servidor);
 
-            if(requisitarOp(req)){
-                enviarArquivo(parametro1);
-                printf("Arquivo enviado. Pressione Enter para continuar...");
+            if(fopen(parametro1,"rb") && requisitarOp(req)){     
+                socketDados = aceitarConexao(cliente, servidor);
+                if(enviarArquivo(parametro1)){             
+                    printf("Arquivo enviado. Pressione Enter para continuar...");
+                    getchar();
+                }
+                else{
+                    printf("ERRO: O arquivo não pode ser enviado. Pressione Enter para continuar...");
+                    getchar();
+                }
+            }
+            else{
+                printf("ERRO: Não foi possivel enviar a requisição. Pressione Enter para continuar...");
                 getchar();
             }
-        }
-        else if (strcmp(op, "encerrar") == 0){
-            strcpy(req.op, op);
 
-            if(requisitarOp(req))
-                encerrarConexao();
+            encerrarConexao(socketDados);
         }
-        else if (strcmp(op, "listar") == 0){
+        else if (op && strcmp(op, "listar") == 0){
             strcpy(req.op, op);
+            req.porta = criarConexao(&cliente, &servidor);
 
             if(requisitarOp(req)){
-                listarArquivos();
-                printf("Pressione Enter para continuar...");
+                socketDados = aceitarConexao(cliente, servidor);
+                if(listarArquivos()){
+                    printf("Lista de arquivos recebida. Pressione Enter para continuar...");
+                    getchar();
+                }
+                else{
+                    printf("ERRO: Não foi possivel listar os arquivos. Pressione Enter para continuar...");
+                    getchar();
+                }
+            }
+            else{
+                printf("ERRO: Não foi possivel enviar a requisição. Pressione Enter para continuar...");
                 getchar();
             }
-        }
-        else if (strcmp(op, "receber") == 0){
 
+            encerrarConexao(socketDados);
+        }
+        else if (op && parametro1 && strcmp(op, "receber") == 0){
             strcpy(req.op, op);
             strcpy(req.nomeRemoto, parametro1);
+            req.porta = criarConexao(&cliente, &servidor);
 
             if(requisitarOp(req)){
-                receberArquivo(parametro2);
-                printf("Arquivo recebido. Pressione Enter para continuar...");
+                socketDados = aceitarConexao(cliente, servidor);
+                recv(socketDados, &rt, sizeof(rt), 0);
+                if(rt && receberArquivo(parametro2)){
+                    printf("Arquivo recebido. Pressione Enter para continuar...");
+                    getchar();
+                }
+                else{
+                    printf("ERRO: O arquivo não pode ser baixado. Pressione Enter para continuar...");
+                    getchar();
+                }
+            }
+            else{
+                printf("ERRO: Não foi possivel enviar a requisição. Pressione Enter para continuar...");
                 getchar();
             }
+
+            encerrarConexao(socketDados);
+        }
+        else if (op && strcmp(op, "encerrar") == 0){
+            strcpy(req.op, op);
+
+            if(requisitarOp(req)){
+                if(encerrarConexao(socketControle)){
+                    printf("Conexão com o servidor encerrada. Pressione Enter para continuar...");
+                    socketControle = 0;
+                    getchar();
+                }
+                else{
+                    printf("ERRO: Voce não está conectado a um servidor. Pressione Enter para continuar...");
+                    getchar();
+                }
+            }
+            else{
+                printf("ERRO: Não foi possivel enviar a requisição. Pressione Enter para continuar...");
+                getchar();
+            }          
+        }
+        else{
+            printf("ERRO: Operação inválida. Pressione Enter para continuar...");
+            getchar();
+        }
+
+        if(liberar){
+            free(parametro2);
+            liberar = 0;
+            parametro2 = NULL;
         }
 
         system("clear");
@@ -104,8 +184,7 @@ void main()
 
 int requisitarOp(struct requisicao req){
 
-    if (send(s, &req, sizeof(req), 0) <= 0){
-        perror("Send()");
+    if (send(socketControle, &req, sizeof(req), 0) <= 0){
         return 0;
     }
 
@@ -114,7 +193,7 @@ int requisitarOp(struct requisicao req){
 
 int conectarServidor(char *nomeServidor, char *portaServidor)
 {
-    if(s == 0){
+    if(socketControle == 0){
         unsigned short port;
         struct hostent *hostnm;
         struct sockaddr_in server;
@@ -122,8 +201,7 @@ int conectarServidor(char *nomeServidor, char *portaServidor)
         hostnm = gethostbyname(nomeServidor);
 
         if (hostnm == (struct hostent *)0){
-            fprintf(stderr, "Gethostbyname failed\n");
-            exit(2);
+            return 0;
         }
 
         port = (unsigned short)atoi(portaServidor);
@@ -132,18 +210,18 @@ int conectarServidor(char *nomeServidor, char *portaServidor)
         server.sin_port = htons(port);
         server.sin_addr.s_addr = *((unsigned long *)hostnm->h_addr);
 
-        if ((s = socket(PF_INET, SOCK_STREAM, 0)) < 0){
-            perror("Socket()");
-            exit(3);
+        if ((socketControle = socket(PF_INET, SOCK_STREAM, 0)) < 0){
+            return 0;
         }
 
-        if (connect(s, (struct sockaddr *)&server, sizeof(server)) < 0){
-            perror("Connect()");
-            exit(4);
+        if (connect(socketControle, (struct sockaddr *)&server, sizeof(server)) < 0){
+            return 0;
         }
+
+        return 1;
     }
     else{
-        return -1;
+        return 0;
     }
 }
 
@@ -152,13 +230,14 @@ int listarArquivos(){
     int bRecebidos;
     char listaArquivos[512];
 
-    if ((bRecebidos = recv(s, listaArquivos, sizeof(listaArquivos), 0)) <= 0){
-        perror("Recv()");
-        exit(6);
+    if ((bRecebidos = recv(socketDados, listaArquivos, sizeof(listaArquivos), 0)) <= 0){
+        return 0;
     }
 
     printf("\n -- LISTA DE ARQUIVOS NO SERVIDOR --\n\n");
     printf("%s\n", listaArquivos);
+
+    return 1;
 }
 
 int receberArquivo(char *nomeLocal){
@@ -171,15 +250,13 @@ int receberArquivo(char *nomeLocal){
     
     bloco = malloc(TAM_BLC);
    
-    if (recv(s, &tamanho, sizeof(tamanho), 0) <= 0){
-        perror("Recv()");
-        exit(6);
+    if (recv(socketDados, &tamanho, sizeof(tamanho), 0) <= 0){
+        return 0;
     }
     
     do{
-        if ((bRecebidos = recv(s, bloco, TAM_BLC, 0)) <= 0){
-            perror("Recv()");
-            exit(6);
+        if ((bRecebidos = recv(socketDados, bloco, TAM_BLC, 0)) <= 0){
+            return 0;
         }
 
         tamanho -= bRecebidos;
@@ -188,6 +265,8 @@ int receberArquivo(char *nomeLocal){
 
     fclose(arquivoLocal);
     free(bloco);
+
+    return 1;
 }
 
 int enviarArquivo(char *nomeLocal){
@@ -196,7 +275,9 @@ int enviarArquivo(char *nomeLocal){
     void *bloco;
     int tamanho, bLidos;
 
-    arquivoLocal = fopen(nomeLocal,"rb");
+    if((arquivoLocal = fopen(nomeLocal,"rb")) <= 0){
+        return 0;
+    }
 
     fseek (arquivoLocal , 0 , SEEK_END);
     tamanho = ftell(arquivoLocal);
@@ -204,16 +285,14 @@ int enviarArquivo(char *nomeLocal){
 
     bloco = malloc(TAM_BLC);
 
-    if (send(s, &tamanho, sizeof(int), 0) <= 0){
-        perror("Send()");
-        exit(1);
+    if (send(socketDados, &tamanho, sizeof(int), 0) <= 0){
+        return 0;
     }
 
     while(tamanho > 0 && (bLidos = fread(bloco, 1, TAM_BLC, arquivoLocal)) >= 0){
 
-        if (send(s, bloco, bLidos, 0) <= 0){
-            perror("Send()");
-            exit(1);
+        if (send(socketDados, bloco, bLidos, 0) <= 0){
+            return 0;
         }
 
         tamanho -= bLidos;  
@@ -221,50 +300,72 @@ int enviarArquivo(char *nomeLocal){
     
     fclose(arquivoLocal);
     free(bloco);
+
+    return 1;
 }
 
-int encerrarConexao(){
-    close(s);
-    exit(0);
-}
+int criarConexao(struct sockaddr_in *cliente, struct sockaddr_in *servidor){
 
-/*Ainda não terminada*/
-int criarConexao(int *len, int *porta){
+    unsigned short port; 
+    struct sockaddr_in server;                    
+    int namelen;
 
-    unsigned short port;                   
-    struct sockaddr_in client; 
-    struct sockaddr_in server; 
-    int s, ns, namelen;
-
-    //port = (unsigned short)7777;
-
-    if ((s = socket(PF_INET, SOCK_STREAM, 0)) < 0){
-	  perror("Socket()");
-	  exit(2);
+    if ((socketD = socket(PF_INET, SOCK_STREAM, 0)) < 0){
+        return 0;
     }
 
     server.sin_family = AF_INET;   
-    server.sin_port   = 0;//htons(port);       
+    server.sin_port   = 0;      
     server.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(s, (struct sockaddr *)&server, sizeof(server)) < 0){
-        perror("Bind()");
-        exit(3);
+    if (bind(socketD, (struct sockaddr *) &server, sizeof(server)) < 0){
+        return 0;
     }
 
     namelen = sizeof(server);
-    if (getsockname(s, (struct sockaddr *) &server, &namelen) < 0){
-        perror("getsockname()");
-        exit(1);
+    if (getsockname(socketD, (struct sockaddr *) &server, &namelen) < 0){
+        return 0;
     }
 
-    if (listen(s, 1) != 0){
-        perror("Listen()");
-        exit(4);
+    if (listen(socketD, 1) != 0){
+        return 0;
     }
 
-    *porta = server.sin_port;
-    *len = namelen;
+    *servidor = server;
 
-    return s;
+    return ntohs(server.sin_port);
+}
+
+int aceitarConexao(struct sockaddr_in cliente, struct sockaddr_in servidor){
+
+    int ns;
+    int namelen = sizeof(servidor);
+
+    if ((ns = accept(socketD, (struct sockaddr *) &cliente, (socklen_t *) &namelen)) == -1){
+        return 0;
+    }
+
+    return ns;
+}
+
+int encerrarConexao(int s){
+
+    if(s != 0 && close(s) < 0){
+        return 0;
+    }
+
+    return 1;
+}
+
+void encerraCliente(){
+
+    struct requisicao req;
+    strcpy(req.op, "encerrar");
+    requisitarOp(req);
+
+    encerrarConexao(socketControle);
+    encerrarConexao(socketDados);
+
+    system("clear");
+    exit(1);
 }
