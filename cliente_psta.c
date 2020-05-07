@@ -14,6 +14,7 @@
 #include <signal.h>
 
 #define TAM_BLC 65536
+#define h_addr h_addr_list[0]
 
 struct requisicao{
 	int porta;
@@ -29,7 +30,7 @@ int conectarServidor(char *nomeServidor, char *portaServidor);
 int listarArquivos();
 int receberArquivo(char *nomeLocal);
 int enviarArquivo(char *nomeLocal);
-int criarConexao(struct sockaddr_in *cliente, struct sockaddr_in *servidor);
+int criarSocket(struct sockaddr_in *cliente, struct sockaddr_in *servidor);
 int encerrarConexao(int s);
 int requisitarOp(struct requisicao req);
 int aceitarConexao(struct sockaddr_in cliente, struct sockaddr_in servidor);
@@ -43,22 +44,26 @@ void main()
     struct requisicao req;
     struct sockaddr_in cliente; 
     struct sockaddr_in servidor;
-    int rt = 0, liberar = 0;
+    int rt = 0, liberar = 0, portaDados = 0;
 
     signal(SIGINT,encerraCliente);
+
+    portaDados = criarSocket(&cliente, &servidor);
 
     while (1){
 
         printf("> ");
         __fpurge(stdin);
-        gets(comando);
+        //gets(comando);
+        fgets(comando, sizeof(comando), stdin);
+        comando[strlen(comando)-1] = '\0';
 
         op = strtok(comando, " ");
         parametro1 = strtok(NULL, " ");
         parametro2 = strtok(NULL, " ");
 
-        if(parametro2 == NULL){
-            parametro2 = malloc(sizeof(parametro1));
+        if(parametro1 != NULL && parametro2 == NULL){
+            parametro2 = malloc(strlen(parametro1)+1);
             strcpy(parametro2, parametro1);
             liberar = 1;
         }
@@ -82,7 +87,7 @@ void main()
         else if (op && parametro1 && strcmp(op, "enviar") == 0){
             strcpy(req.op, op);
             strcpy(req.nomeRemoto, parametro2);
-            req.porta = criarConexao(&cliente, &servidor);
+            req.porta = portaDados;
 
             if(fopen(parametro1,"rb") && requisitarOp(req)){     
                 socketDados = aceitarConexao(cliente, servidor);
@@ -104,8 +109,7 @@ void main()
         }
         else if (op && strcmp(op, "listar") == 0){
             strcpy(req.op, op);
-            req.porta = criarConexao(&cliente, &servidor);
-
+            req.porta = portaDados;
             if(requisitarOp(req)){
                 socketDados = aceitarConexao(cliente, servidor);
                 if(listarArquivos()){
@@ -127,7 +131,7 @@ void main()
         else if (op && parametro1 && strcmp(op, "receber") == 0){
             strcpy(req.op, op);
             strcpy(req.nomeRemoto, parametro1);
-            req.porta = criarConexao(&cliente, &servidor);
+            req.porta = portaDados;
 
             if(requisitarOp(req)){
                 socketDados = aceitarConexao(cliente, servidor);
@@ -175,11 +179,14 @@ void main()
         if(liberar){
             free(parametro2);
             liberar = 0;
+
+            op = NULL;
+            parametro1 = NULL;
             parametro2 = NULL;
         }
 
         system("clear");
-    } 
+    }
 }
 
 int requisitarOp(struct requisicao req){
@@ -304,7 +311,7 @@ int enviarArquivo(char *nomeLocal){
     return 1;
 }
 
-int criarConexao(struct sockaddr_in *cliente, struct sockaddr_in *servidor){
+int criarSocket(struct sockaddr_in *cliente, struct sockaddr_in *servidor){
 
     unsigned short port; 
     struct sockaddr_in server;                    
@@ -365,6 +372,7 @@ void encerraCliente(){
 
     encerrarConexao(socketControle);
     encerrarConexao(socketDados);
+    encerrarConexao(socketD);
 
     system("clear");
     exit(1);

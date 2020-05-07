@@ -15,8 +15,10 @@
 #include <sys/syscall.h>
 #include <signal.h>
 
+#define PORT 7000
 #define TAM_BLC 65536
 #define PASTA "Arquivos/"
+#define h_addr h_addr_list[0]
 
 struct parametro{
 	int socketControle;
@@ -36,9 +38,10 @@ int receberArquivo(struct parametro clienteInfo, char *nomeRemoto, int socketDad
 int encerrarConexao(int s);
 int conectarCliente(struct sockaddr_in cliente, int portaCliente);
 int verificaExistencia(int socketDados, char *nomeArquivo);
+void encerraServidor();
 
 int socketControle = 0;
-int socketAux;
+int socketAux = 0;
 
 void main(){
                     
@@ -47,21 +50,18 @@ void main(){
     int namelen, tp;
     pthread_t thread;
     struct parametro parametros;
+    
+    signal(SIGINT, encerraServidor);
 
     if ((socketControle = socket(PF_INET, SOCK_STREAM, 0)) < 0){
         exit(0);
     }
 
     server.sin_family = AF_INET;   
-    server.sin_port   = 0;      
+    server.sin_port   = htons(PORT);      
     server.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(socketControle, (struct sockaddr *)&server, sizeof(server)) < 0){
-        exit(0);
-    }
-
-    namelen = sizeof(server);
-    if (getsockname(socketControle, (struct sockaddr *) &server, &namelen) < 0){
         exit(0);
     }
 
@@ -296,4 +296,12 @@ int conectarCliente(struct sockaddr_in cliente, int portaCliente){
 
 int encerrarConexao(int s){
     close(s);
+}
+
+void encerraServidor(){
+    encerrarConexao(socketControle);
+    encerrarConexao(socketAux);
+
+    system("clear");
+    exit(1);
 }
